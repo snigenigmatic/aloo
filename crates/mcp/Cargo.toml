@@ -1,0 +1,9 @@
+[package]
+name = "aloo-mcp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+aloo-engine.workspace = true
+serde.workspace = true
+serde_json.workspace = true

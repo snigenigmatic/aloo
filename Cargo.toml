@@ -1,17 +1,21 @@
-[package]
-name = "aloo"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = [
+    "crates/bench",
+    "crates/cli",
+    "crates/engine",
+    "crates/mcp",
+]
+resolver = "3"
 
-[dependencies]
-criterion = "0.8.2"
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+[workspace.dependencies]
+aloo-engine = { path = "crates/engine" }
 flate2 = "1.1.9"
-insta = "1.48.0"
-oxc = "0.102.0"
-proptest = "1.11.0"
 regex = "1.12.4"
-serde = "1.0.228"
+serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 tar = "0.4.46"
 thiserror = "2.0.18"
-ureq = "3.3.0"
