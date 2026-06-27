@@ -5,7 +5,7 @@ pub const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 pub const CODE_EXTENSIONS: &[&str] = &["js", "cjs", "mjs", "ts", "jsx", "tsx"];
 pub const LIFECYCLE_HOOKS: &[&str] = &["preinstall", "install", "postinstall"];
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
     pub name: String,
     pub version: String,
@@ -13,13 +13,13 @@ pub struct Manifest {
     pub raw: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceFile {
     pub path: String,
     pub contents: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageVersion {
     pub name: String,
     pub version: String,
@@ -69,18 +69,6 @@ impl SourceKind {
             | SourceKind::WalletData => Sensitivity::Critical,
         }
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            SourceKind::ProcessEnv => "environment variable",
-            SourceKind::EnvFile => ".env file",
-            SourceKind::NpmToken => "npm auth token",
-            SourceKind::SshKey => "SSH key",
-            SourceKind::AwsCredentials => "AWS credential",
-            SourceKind::WalletData => "wallet data",
-            SourceKind::BrowserData => "browser data",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -99,26 +87,26 @@ pub struct Evidence {
     pub snippet: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceObs {
     pub kind: SourceKind,
     pub evidence: Evidence,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SinkObs {
     pub kind: SinkKind,
     pub evidence: Evidence,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FlowObs {
     pub source: SourceKind,
     pub sink: SinkKind,
     pub evidence: Evidence,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileFacts {
     pub path: String,
     pub sources: Vec<SourceObs>,
@@ -126,7 +114,7 @@ pub struct FileFacts {
     pub flows: Vec<FlowObs>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageFacts {
     pub files: Vec<FileFacts>,
 }
@@ -209,5 +197,31 @@ pub fn evidence(file: impl Into<String>, line: usize, snippet: impl AsRef<str>) 
         file: file.into(),
         line,
         snippet: text,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decision_exit_codes_match_contract() {
+        assert_eq!(Decision::Allow.exit_code(), 0);
+        assert_eq!(Decision::Warn.exit_code(), 1);
+        assert_eq!(Decision::Block.exit_code(), 2);
+    }
+
+    #[test]
+    fn source_sensitivity_matches_contract() {
+        assert_eq!(SourceKind::ProcessEnv.sensitivity(), Sensitivity::Elevated);
+        assert_eq!(SourceKind::EnvFile.sensitivity(), Sensitivity::Elevated);
+        assert_eq!(SourceKind::BrowserData.sensitivity(), Sensitivity::Elevated);
+        assert_eq!(SourceKind::NpmToken.sensitivity(), Sensitivity::Critical);
+        assert_eq!(SourceKind::SshKey.sensitivity(), Sensitivity::Critical);
+        assert_eq!(
+            SourceKind::AwsCredentials.sensitivity(),
+            Sensitivity::Critical
+        );
+        assert_eq!(SourceKind::WalletData.sensitivity(), Sensitivity::Critical);
     }
 }
