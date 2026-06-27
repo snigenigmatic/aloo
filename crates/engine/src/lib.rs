@@ -1,8 +1,10 @@
 pub mod analyzer;
+pub mod backend;
 pub mod model;
 pub mod score;
 
 pub use analyzer::Analyzer;
+pub use backend::heuristic::HeuristicAnalyzer;
 pub use model::{
     CODE_EXTENSIONS, Decision, Evidence, FileFacts, FlowObs, LIFECYCLE_HOOKS, MAX_FILE_BYTES,
     Manifest, PackageFacts, PackageVersion, Reason, ReasonCode, Sensitivity, Severity, SinkKind,
