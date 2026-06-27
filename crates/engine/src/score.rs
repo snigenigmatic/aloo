@@ -1,10 +1,41 @@
 use crate::model::{Decision, Reason, Severity};
-use serde::{Deserialize, Serialize};
+use serde::de::Error;
+use serde::{Deserialize, Deserializer, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct ScoreConfig {
+    warn_threshold: u32,
+    block_threshold: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScoreConfigError {
     pub warn_threshold: u32,
     pub block_threshold: u32,
+}
+
+impl ScoreConfig {
+    pub fn new(warn_threshold: u32, block_threshold: u32) -> Result<Self, ScoreConfigError> {
+        if warn_threshold < block_threshold {
+            Ok(Self {
+                warn_threshold,
+                block_threshold,
+            })
+        } else {
+            Err(ScoreConfigError {
+                warn_threshold,
+                block_threshold,
+            })
+        }
+    }
+
+    pub fn warn_threshold(self) -> u32 {
+        self.warn_threshold
+    }
+
+    pub fn block_threshold(self) -> u32 {
+        self.block_threshold
+    }
 }
 
 impl Default for ScoreConfig {
@@ -13,6 +44,27 @@ impl Default for ScoreConfig {
             warn_threshold: 15,
             block_threshold: 100,
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for ScoreConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawScoreConfig {
+            warn_threshold: u32,
+            block_threshold: u32,
+        }
+
+        let raw = RawScoreConfig::deserialize(deserializer)?;
+        ScoreConfig::new(raw.warn_threshold, raw.block_threshold).map_err(|error| {
+            D::Error::custom(format!(
+                "warn_threshold {} must be lower than block_threshold {}",
+                error.warn_threshold, error.block_threshold
+            ))
+        })
     }
 }
 
@@ -71,8 +123,41 @@ mod tests {
     #[test]
     fn default_thresholds_match_contract() {
         let config = ScoreConfig::default();
-        assert_eq!(config.warn_threshold, 15);
-        assert_eq!(config.block_threshold, 100);
+        assert_eq!(config.warn_threshold(), 15);
+        assert_eq!(config.block_threshold(), 100);
+    }
+
+    #[test]
+    fn default_decision_boundaries_hold() {
+        assert_eq!(score_reasons(&[]), (Decision::Allow, 0));
+        assert_eq!(
+            score_reasons(&[reason(Severity::Low)]),
+            (Decision::Allow, 5)
+        );
+        assert_eq!(
+            score_reasons(&[reason(Severity::Medium)]),
+            (Decision::Warn, 15)
+        );
+        assert_eq!(
+            score_reasons(&[
+                reason(Severity::High),
+                reason(Severity::High),
+                reason(Severity::Medium),
+                reason(Severity::Low),
+            ]),
+            (Decision::Block, 100)
+        );
+    }
+
+    #[test]
+    fn critical_always_blocks_with_custom_thresholds() {
+        assert_eq!(
+            score_reasons_with_config(
+                &[reason(Severity::Critical)],
+                ScoreConfig::new(15, 200).unwrap(),
+            ),
+            (Decision::Block, 100)
+        );
     }
 
     #[test]
@@ -80,12 +165,27 @@ mod tests {
         assert_eq!(
             score_reasons_with_config(
                 &[reason(Severity::Medium)],
-                ScoreConfig {
-                    warn_threshold: 50,
-                    block_threshold: 100,
-                },
+                ScoreConfig::new(50, 100).unwrap(),
             ),
             (Decision::Allow, 15)
         );
+    }
+
+    #[test]
+    fn score_config_rejects_inverted_thresholds() {
+        assert_eq!(
+            ScoreConfig::new(200, 100),
+            Err(ScoreConfigError {
+                warn_threshold: 200,
+                block_threshold: 100,
+            })
+        );
+    }
+
+    #[test]
+    fn score_config_deserialization_rejects_inverted_thresholds() {
+        let result =
+            serde_json::from_str::<ScoreConfig>(r#"{"warn_threshold":200,"block_threshold":100}"#);
+        assert!(result.is_err());
     }
 }
