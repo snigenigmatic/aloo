@@ -1,0 +1,8 @@
+[package]
+name = "aloo"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+aloo-engine.workspace = true
+serde_json.workspace = true

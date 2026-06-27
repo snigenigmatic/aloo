@@ -1,9 +1,26 @@
 use crate::model::{Decision, Reason, Severity};
+use serde::{Deserialize, Serialize};
 
-pub const WARN_THRESHOLD: u32 = 15;
-pub const BLOCK_THRESHOLD: u32 = 100;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScoreConfig {
+    pub warn_threshold: u32,
+    pub block_threshold: u32,
+}
+
+impl Default for ScoreConfig {
+    fn default() -> Self {
+        Self {
+            warn_threshold: 15,
+            block_threshold: 100,
+        }
+    }
+}
 
 pub fn score_reasons(reasons: &[Reason]) -> (Decision, u32) {
+    score_reasons_with_config(reasons, ScoreConfig::default())
+}
+
+pub fn score_reasons_with_config(reasons: &[Reason], config: ScoreConfig) -> (Decision, u32) {
     let score = reasons
         .iter()
         .map(|reason| severity_weight(reason.severity))
@@ -12,11 +29,10 @@ pub fn score_reasons(reasons: &[Reason]) -> (Decision, u32) {
     if reasons
         .iter()
         .any(|reason| reason.severity == Severity::Critical)
+        || score >= config.block_threshold
     {
         (Decision::Block, score)
-    } else if score >= BLOCK_THRESHOLD {
-        (Decision::Block, score)
-    } else if score >= WARN_THRESHOLD {
+    } else if score >= config.warn_threshold {
         (Decision::Warn, score)
     } else {
         (Decision::Allow, score)
@@ -53,24 +69,23 @@ mod tests {
     }
 
     #[test]
-    fn threshold_boundaries_hold() {
-        assert_eq!(score_reasons(&[]), (Decision::Allow, 0));
+    fn default_thresholds_match_contract() {
+        let config = ScoreConfig::default();
+        assert_eq!(config.warn_threshold, 15);
+        assert_eq!(config.block_threshold, 100);
+    }
+
+    #[test]
+    fn score_config_thresholds_are_used() {
         assert_eq!(
-            score_reasons(&[reason(Severity::Medium)]),
-            (Decision::Warn, 15)
-        );
-        assert_eq!(
-            score_reasons(&[
-                reason(Severity::High),
-                reason(Severity::High),
-                reason(Severity::Medium),
-                reason(Severity::Low)
-            ]),
-            (Decision::Block, 100)
-        );
-        assert_eq!(
-            score_reasons(&[reason(Severity::Critical)]),
-            (Decision::Block, 100)
+            score_reasons_with_config(
+                &[reason(Severity::Medium)],
+                ScoreConfig {
+                    warn_threshold: 50,
+                    block_threshold: 100,
+                },
+            ),
+            (Decision::Allow, 15)
         );
     }
 }

@@ -14,6 +14,12 @@ Three rules govern every change here:
 2. The engine is pure and static. It reads bytes and reports. It never executes package code and never makes network calls.
 3. Every change to detection is proven against the benchmark before it ships. Numbers, not claims.
 
+## Project workflow
+
+Treat GitHub issues as feature units and milestones as the delivery plan. Work should start from the issue, use a dedicated branch for that issue, and close through a pull request with validation results attached. Do not bundle unrelated issues in one branch.
+
+CI is part of the product. It must build, test, lint, format-check, run the benchmark gate, and include supply-chain safety checks for Rust crates and generated release artifacts. A change is not ready if CI cannot prove the crate and packages are safe to consume.
+
 ## Commands
 
 ```
