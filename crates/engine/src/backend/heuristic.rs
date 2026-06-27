@@ -5,6 +5,7 @@ use crate::model::{
 };
 use regex::Regex;
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 pub struct HeuristicAnalyzer;
 
@@ -14,9 +15,6 @@ impl Analyzer for HeuristicAnalyzer {
     }
 
     fn analyze_package(&self, pkg: &PackageVersion) -> PackageFacts {
-        let source_patterns = source_patterns();
-        let sink_patterns = sink_patterns();
-
         let mut files = pkg
             .files
             .iter()
@@ -27,7 +25,7 @@ impl Analyzer for HeuristicAnalyzer {
                 for (index, line) in file.contents.lines().enumerate() {
                     let line_number = index + 1;
 
-                    for (kind, pattern) in &source_patterns {
+                    for (kind, pattern) in source_patterns() {
                         if pattern.is_match(line) {
                             sources.push(SourceObs {
                                 kind: *kind,
@@ -36,7 +34,7 @@ impl Analyzer for HeuristicAnalyzer {
                         }
                     }
 
-                    for (kind, pattern) in &sink_patterns {
+                    for (kind, pattern) in sink_patterns() {
                         if pattern.is_match(line) {
                             sinks.push(SinkObs {
                                 kind: *kind,
@@ -72,69 +70,83 @@ impl Analyzer for HeuristicAnalyzer {
     }
 }
 
-fn source_patterns() -> Vec<(SourceKind, Regex)> {
-    vec![
-        (
-            SourceKind::ProcessEnv,
-            Regex::new(r"process\s*\.\s*env").unwrap(),
-        ),
-        (
-            SourceKind::NpmToken,
-            Regex::new(r"\.npmrc|NPM_TOKEN|_authToken").unwrap(),
-        ),
-        (
-            SourceKind::SshKey,
-            Regex::new(r"\.ssh/|\.ssh\\|id_rsa").unwrap(),
-        ),
-        (
-            SourceKind::AwsCredentials,
-            Regex::new(r"\.aws/credentials|\.aws\\credentials|AWS_SECRET_ACCESS_KEY").unwrap(),
-        ),
-        (
-            SourceKind::EnvFile,
-            Regex::new(r#"["'`][^"'`]*\.env(?:\.[^"'`]*)?["'`]"#).unwrap(),
-        ),
-        (
-            SourceKind::WalletData,
-            Regex::new(r"wallet\.dat|keystore|MetaMask").unwrap(),
-        ),
-        (
-            SourceKind::BrowserData,
-            Regex::new(r"Login Data|Cookies|leveldb").unwrap(),
-        ),
-    ]
+fn source_patterns() -> &'static [(SourceKind, Regex)] {
+    static SOURCE_PATTERNS: OnceLock<Vec<(SourceKind, Regex)>> = OnceLock::new();
+    SOURCE_PATTERNS
+        .get_or_init(|| {
+            vec![
+                (
+                    SourceKind::ProcessEnv,
+                    Regex::new(r"process\s*\.\s*env").unwrap(),
+                ),
+                (
+                    SourceKind::NpmToken,
+                    Regex::new(r"\.npmrc|NPM_TOKEN|_authToken").unwrap(),
+                ),
+                (
+                    SourceKind::SshKey,
+                    Regex::new(r"\.ssh/|\.ssh\\|id_rsa").unwrap(),
+                ),
+                (
+                    SourceKind::AwsCredentials,
+                    Regex::new(r"\.aws/credentials|\.aws\\credentials|AWS_SECRET_ACCESS_KEY")
+                        .unwrap(),
+                ),
+                (
+                    SourceKind::EnvFile,
+                    Regex::new(r#"["'`][^"'`]*\.env(?:\.[^"'`]*)?["'`]"#).unwrap(),
+                ),
+                (
+                    SourceKind::WalletData,
+                    Regex::new(r"wallet\.dat|keystore|MetaMask").unwrap(),
+                ),
+                (
+                    SourceKind::BrowserData,
+                    Regex::new(
+                        r"(?:Chrome|Chromium|Brave|Edge|User Data|Default|Profile [0-9]+)/.*(?:Login Data|Cookies|leveldb)",
+                    )
+                    .unwrap(),
+                ),
+            ]
+        })
+        .as_slice()
 }
 
-fn sink_patterns() -> Vec<(SinkKind, Regex)> {
-    vec![
-        (
-            SinkKind::NetworkSend,
-            Regex::new(
-                r"fetch\s*\(|https?\.request|axios|net\.connect|WebSocket\s*\(|\.post\s*\(|dns\.",
-            )
-            .unwrap(),
-        ),
-        (
-            SinkKind::ProcessExec,
-            Regex::new(r"child_process|execSync\s*\(|exec\s*\(|spawn\s*\(|execFile\s*\(").unwrap(),
-        ),
-        (
-            SinkKind::DynamicEval,
-            Regex::new(r"eval\s*\(|new\s+Function\s*\(|vm\.runIn").unwrap(),
-        ),
-        (
-            SinkKind::FilesystemWrite,
-            Regex::new(r"writeFileSync\s*\(|createWriteStream\s*\(").unwrap(),
-        ),
-    ]
+fn sink_patterns() -> &'static [(SinkKind, Regex)] {
+    static SINK_PATTERNS: OnceLock<Vec<(SinkKind, Regex)>> = OnceLock::new();
+    SINK_PATTERNS
+        .get_or_init(|| {
+            vec![
+                (
+                    SinkKind::NetworkSend,
+                    Regex::new(
+                        r"fetch\s*\(|https?\.request|axios|net\.connect|WebSocket\s*\(|(?:axios|got|request|superagent|needle|httpClient|httpsClient)\s*\.\s*post\s*\(|dns\.",
+                    )
+                    .unwrap(),
+                ),
+                (
+                    SinkKind::ProcessExec,
+                    Regex::new(
+                        r"child_process|execSync\s*\(|(?:^|[^.$\w])exec\s*\(|spawn\s*\(|execFile\s*\(",
+                    )
+                    .unwrap(),
+                ),
+                (
+                    SinkKind::DynamicEval,
+                    Regex::new(r"eval\s*\(|new\s+Function\s*\(|vm\.runIn").unwrap(),
+                ),
+                (
+                    SinkKind::FilesystemWrite,
+                    Regex::new(r"writeFileSync\s*\(|createWriteStream\s*\(").unwrap(),
+                ),
+            ]
+        })
+        .as_slice()
 }
 
 fn infer_flows(sources: &[SourceObs], sinks: &[SinkObs]) -> Vec<FlowObs> {
-    if !sinks.iter().any(|sink| sink.kind == SinkKind::NetworkSend) {
-        return Vec::new();
-    }
-
     let mut source_evidence = BTreeMap::new();
+    let mut sink_kinds = BTreeMap::new();
 
     for source in sources {
         source_evidence
@@ -142,14 +154,23 @@ fn infer_flows(sources: &[SourceObs], sinks: &[SinkObs]) -> Vec<FlowObs> {
             .or_insert_with(|| source.evidence.clone());
     }
 
-    source_evidence
-        .into_iter()
-        .map(|(source, evidence)| FlowObs {
-            source,
-            sink: SinkKind::NetworkSend,
-            evidence,
-        })
-        .collect()
+    for sink in sinks {
+        sink_kinds.entry(sink.kind).or_insert(());
+    }
+
+    let mut flows = Vec::new();
+    for (source, evidence) in source_evidence {
+        for sink in sink_kinds.keys() {
+            flows.push(FlowObs {
+                source,
+                sink: *sink,
+                evidence: evidence.clone(),
+            });
+        }
+    }
+
+    flows.sort();
+    flows
 }
 
 #[cfg(test)]
@@ -175,13 +196,12 @@ mod tests {
         }
     }
 
+    fn package_facts(contents: &str) -> PackageFacts {
+        HeuristicAnalyzer.analyze_package(&package(contents))
+    }
+
     fn first_file_facts(contents: &str) -> FileFacts {
-        HeuristicAnalyzer
-            .analyze_package(&package(contents))
-            .files
-            .into_iter()
-            .next()
-            .unwrap()
+        package_facts(contents).files.into_iter().next().unwrap()
     }
 
     #[test]
@@ -198,6 +218,30 @@ mod tests {
         assert_eq!(facts.flows.len(), 1);
         assert_eq!(facts.flows[0].source, SourceKind::ProcessEnv);
         assert_eq!(facts.flows[0].sink, SinkKind::NetworkSend);
+    }
+
+    #[test]
+    fn env_plus_exec_yields_flow() {
+        let facts = first_file_facts(
+            "const key = process.env.AWS_SECRET_ACCESS_KEY;\nexecSync('aws configure set secret ' + key);",
+        );
+
+        assert!(
+            facts
+                .flows
+                .iter()
+                .any(|flow| flow.source == SourceKind::AwsCredentials
+                    && flow.sink == SinkKind::ProcessExec)
+        );
+    }
+
+    #[test]
+    fn env_plus_eval_yields_flow() {
+        let facts = first_file_facts("const value = process.env.SECRET;\neval(value);");
+
+        assert!(facts.flows.iter().any(
+            |flow| flow.source == SourceKind::ProcessEnv && flow.sink == SinkKind::DynamicEval
+        ));
     }
 
     #[test]
@@ -244,7 +288,10 @@ mod tests {
             ),
             (SourceKind::EnvFile, "fs.readFileSync('.env');"),
             (SourceKind::WalletData, "const value = 'wallet.dat';"),
-            (SourceKind::BrowserData, "const value = 'Login Data';"),
+            (
+                SourceKind::BrowserData,
+                "const value = 'Chrome/User Data/Default/Login Data';",
+            ),
         ];
 
         for (expected, contents) in cases {
@@ -270,7 +317,7 @@ mod tests {
                 SinkKind::NetworkSend,
                 "new WebSocket('wss://example.invalid');",
             ),
-            (SinkKind::NetworkSend, "client.post('/event');"),
+            (SinkKind::NetworkSend, "httpClient.post('/event');"),
             (SinkKind::NetworkSend, "dns.lookup('example.invalid');"),
             (SinkKind::ProcessExec, "child_process.exec('echo ok');"),
             (SinkKind::ProcessExec, "execSync('echo ok');"),
@@ -294,7 +341,22 @@ mod tests {
     }
 
     #[test]
-    fn repeated_source_kind_produces_one_flow() {
+    fn broad_post_and_regex_exec_do_not_trigger_sinks() {
+        let facts =
+            package_facts("router.post('/route', handler);\nconst found = /x/.exec(value);");
+
+        assert!(facts.files.is_empty());
+    }
+
+    #[test]
+    fn generic_cookie_text_does_not_trigger_browser_data() {
+        let facts = package_facts("const label = 'Cookies';\ndocument.cookie = 'a=b';");
+
+        assert!(facts.files.is_empty());
+    }
+
+    #[test]
+    fn repeated_source_kind_produces_one_flow_per_sink_kind() {
         let facts = first_file_facts(
             "const a = process.env.A;\nconst b = process.env.B;\nfetch('https://example.invalid', { body: a + b });",
         );
