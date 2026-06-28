@@ -1,7 +1,7 @@
 use crate::analyzer::Analyzer;
 use crate::model::{
-    FileFacts, FlowObs, PackageFacts, PackageVersion, SinkKind, SinkObs, SourceKind, SourceObs,
-    evidence,
+    FileFacts, FlowObs, LifecycleScriptObs, PackageFacts, PackageVersion, SinkKind, SinkObs,
+    SourceKind, SourceObs, evidence,
 };
 use regex::Regex;
 use std::collections::BTreeMap;
@@ -15,10 +15,9 @@ impl Analyzer for HeuristicAnalyzer {
     }
 
     fn analyze_package(&self, pkg: &PackageVersion) -> PackageFacts {
-        let mut files = pkg
-            .files
-            .iter()
-            .filter_map(|file| {
+        let mut files = lifecycle_file_facts(pkg)
+            .into_iter()
+            .chain(pkg.files.iter().filter_map(|file| {
                 let mut sources = Vec::new();
                 let mut sinks = Vec::new();
 
@@ -56,18 +55,57 @@ impl Analyzer for HeuristicAnalyzer {
                 } else {
                     Some(FileFacts {
                         path: file.path.clone(),
+                        lifecycle_scripts: Vec::new(),
                         sources,
                         sinks,
                         flows,
                     })
                 }
-            })
+            }))
             .collect::<Vec<_>>();
 
         files.sort_by(|a, b| a.path.cmp(&b.path));
 
         PackageFacts { files }
     }
+}
+
+fn lifecycle_file_facts(pkg: &PackageVersion) -> Option<FileFacts> {
+    let mut lifecycle_scripts = pkg
+        .lifecycle_scripts()
+        .map(|(hook, command)| LifecycleScriptObs {
+            hook,
+            command: command.to_string(),
+            evidence: evidence(
+                "package.json",
+                manifest_line(&pkg.manifest.raw, hook.as_str()),
+                format!("\"{}\": \"{}\"", hook.as_str(), command),
+            ),
+        })
+        .collect::<Vec<_>>();
+
+    lifecycle_scripts.sort();
+    lifecycle_scripts.dedup();
+
+    if lifecycle_scripts.is_empty() {
+        None
+    } else {
+        Some(FileFacts {
+            path: "package.json".to_string(),
+            lifecycle_scripts,
+            sources: Vec::new(),
+            sinks: Vec::new(),
+            flows: Vec::new(),
+        })
+    }
+}
+
+fn manifest_line(raw: &str, hook: &str) -> usize {
+    let needle = format!("\"{hook}\"");
+    raw.lines()
+        .position(|line| line.contains(&needle))
+        .map(|index| index + 1)
+        .unwrap_or(0)
 }
 
 fn source_patterns() -> &'static [(SourceKind, Regex)] {
