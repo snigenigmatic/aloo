@@ -1,7 +1,8 @@
 use crate::analyzer::Analyzer;
 use crate::model::{
-    EncodedLiteralKind, EncodedLiteralObs, FileFacts, FlowObs, LifecycleScriptObs, PackageFacts,
-    PackageVersion, SinkKind, SinkObs, SourceKind, SourceObs, evidence,
+    DecodedEvalKind, DecodedEvalObs, EncodedLiteralKind, EncodedLiteralObs, EndpointKind,
+    EndpointObs, FileFacts, FlowObs, LifecycleScriptObs, PackageFacts, PackageVersion, SinkKind,
+    SinkObs, SourceKind, SourceObs, evidence,
 };
 use regex::Regex;
 use std::collections::BTreeMap;
@@ -25,6 +26,8 @@ impl Analyzer for HeuristicAnalyzer {
                 let mut sources = Vec::new();
                 let mut sinks = Vec::new();
                 let mut encoded_literals = Vec::new();
+                let mut endpoints = Vec::new();
+                let mut decoded_evals = Vec::new();
 
                 for (index, line) in file.contents.lines().enumerate() {
                     let line_number = index + 1;
@@ -52,24 +55,37 @@ impl Analyzer for HeuristicAnalyzer {
                         line_number,
                         line,
                     ));
+                    endpoints.extend(extract_endpoints(&file.path, line_number, line));
+                    decoded_evals.extend(extract_decoded_evals(&file.path, line_number, line));
                 }
 
                 sources.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.evidence.cmp(&b.evidence)));
                 sinks.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.evidence.cmp(&b.evidence)));
                 encoded_literals.sort();
                 encoded_literals.dedup();
+                endpoints.sort();
+                endpoints.dedup();
+                decoded_evals.sort();
+                decoded_evals.dedup();
                 sources.dedup_by(|a, b| a.kind == b.kind && a.evidence == b.evidence);
                 sinks.dedup_by(|a, b| a.kind == b.kind && a.evidence == b.evidence);
 
                 let flows = infer_flows(&sources, &sinks);
 
-                if sources.is_empty() && sinks.is_empty() && encoded_literals.is_empty() {
+                if sources.is_empty()
+                    && sinks.is_empty()
+                    && encoded_literals.is_empty()
+                    && endpoints.is_empty()
+                    && decoded_evals.is_empty()
+                {
                     None
                 } else {
                     Some(FileFacts {
                         path: file.path.clone(),
                         lifecycle_scripts: Vec::new(),
                         encoded_literals,
+                        endpoints,
+                        decoded_evals,
                         sources,
                         sinks,
                         flows,
@@ -108,6 +124,8 @@ fn lifecycle_file_facts(pkg: &PackageVersion) -> Option<FileFacts> {
             path: "package.json".to_string(),
             lifecycle_scripts,
             encoded_literals: Vec::new(),
+            endpoints: Vec::new(),
+            decoded_evals: Vec::new(),
             sources: Vec::new(),
             sinks: Vec::new(),
             flows: Vec::new(),
@@ -227,6 +245,76 @@ fn from_char_code_pattern() -> &'static Regex {
     FROM_CHAR_CODE_PATTERN.get_or_init(|| Regex::new(r"String\.fromCharCode\s*\(").unwrap())
 }
 
+fn extract_endpoints(path: &str, line_number: usize, line: &str) -> Vec<EndpointObs> {
+    let mut observations = Vec::new();
+
+    for (kind, pattern) in endpoint_patterns() {
+        if pattern.is_match(line) {
+            observations.push(EndpointObs {
+                kind: *kind,
+                evidence: evidence(path, line_number, line),
+            });
+        }
+    }
+
+    observations
+}
+
+fn extract_decoded_evals(path: &str, line_number: usize, line: &str) -> Vec<DecodedEvalObs> {
+    let mut observations = Vec::new();
+
+    for (kind, pattern) in decoded_eval_patterns() {
+        if pattern.is_match(line) {
+            observations.push(DecodedEvalObs {
+                kind: *kind,
+                evidence: evidence(path, line_number, line),
+            });
+        }
+    }
+
+    observations
+}
+
+fn endpoint_patterns() -> &'static [(EndpointKind, Regex)] {
+    static ENDPOINT_PATTERNS: OnceLock<Vec<(EndpointKind, Regex)>> = OnceLock::new();
+    ENDPOINT_PATTERNS
+        .get_or_init(|| {
+            vec![
+                (
+                    EndpointKind::DiscordWebhook,
+                    Regex::new(r"discord(?:app)?\.com/api/webhooks/").unwrap(),
+                ),
+                (
+                    EndpointKind::TelegramBot,
+                    Regex::new(r"api\.telegram\.org/bot").unwrap(),
+                ),
+            ]
+        })
+        .as_slice()
+}
+
+fn decoded_eval_patterns() -> &'static [(DecodedEvalKind, Regex)] {
+    static DECODED_EVAL_PATTERNS: OnceLock<Vec<(DecodedEvalKind, Regex)>> = OnceLock::new();
+    DECODED_EVAL_PATTERNS
+        .get_or_init(|| {
+            vec![
+                (
+                    DecodedEvalKind::Atob,
+                    Regex::new(r"eval\s*\(\s*atob\s*\(").unwrap(),
+                ),
+                (
+                    DecodedEvalKind::BufferFrom,
+                    Regex::new(r"eval\s*\(\s*Buffer\s*\.\s*from\s*\(").unwrap(),
+                ),
+                (
+                    DecodedEvalKind::Unescape,
+                    Regex::new(r"eval\s*\(\s*unescape\s*\(").unwrap(),
+                ),
+            ]
+        })
+        .as_slice()
+}
+
 fn source_patterns() -> &'static [(SourceKind, Regex)] {
     static SOURCE_PATTERNS: OnceLock<Vec<(SourceKind, Regex)>> = OnceLock::new();
     SOURCE_PATTERNS
@@ -333,7 +421,9 @@ fn infer_flows(sources: &[SourceObs], sinks: &[SinkObs]) -> Vec<FlowObs> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{EncodedLiteralKind, Manifest, PackageVersion, SourceFile};
+    use crate::model::{
+        DecodedEvalKind, EncodedLiteralKind, EndpointKind, Manifest, PackageVersion, SourceFile,
+    };
     use std::collections::BTreeMap;
 
     fn package(contents: &str) -> PackageVersion {
@@ -688,5 +778,88 @@ mod tests {
         let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let value: String = alphabet.chars().cycle().take(128).collect();
         assert!(shannon_entropy(&value) > 4.5);
+    }
+
+    #[test]
+    fn discord_webhook_emits_endpoint_observation() {
+        let facts = HeuristicAnalyzer.analyze_package(&package_with_files(vec![SourceFile {
+            path: "src/index.js".to_string(),
+            contents: r#"fetch("https://discord.com/api/webhooks/123/token");"#.to_string(),
+        }]));
+
+        let file = facts.files.into_iter().next().unwrap();
+        assert_eq!(file.endpoints.len(), 1);
+        assert_eq!(file.endpoints[0].kind, EndpointKind::DiscordWebhook);
+    }
+
+    #[test]
+    fn discordapp_legacy_host_emits_endpoint_observation() {
+        let facts = HeuristicAnalyzer.analyze_package(&package_with_files(vec![SourceFile {
+            path: "src/index.js".to_string(),
+            contents: r#"fetch("https://discordapp.com/api/webhooks/123/token");"#.to_string(),
+        }]));
+
+        let file = facts.files.into_iter().next().unwrap();
+        assert_eq!(file.endpoints.len(), 1);
+        assert_eq!(file.endpoints[0].kind, EndpointKind::DiscordWebhook);
+    }
+
+    #[test]
+    fn telegram_bot_url_emits_endpoint_observation() {
+        let facts = HeuristicAnalyzer.analyze_package(&package_with_files(vec![SourceFile {
+            path: "src/index.js".to_string(),
+            contents: r#"fetch("https://api.telegram.org/bot123/sendMessage");"#.to_string(),
+        }]));
+
+        let file = facts.files.into_iter().next().unwrap();
+        assert_eq!(file.endpoints.len(), 1);
+        assert_eq!(file.endpoints[0].kind, EndpointKind::TelegramBot);
+    }
+
+    #[test]
+    fn eval_atob_emits_decoded_eval_observation() {
+        let facts = HeuristicAnalyzer.analyze_package(&package_with_files(vec![SourceFile {
+            path: "src/index.js".to_string(),
+            contents: r#"eval(atob("SGVsbG8="));"#.to_string(),
+        }]));
+
+        let file = facts.files.into_iter().next().unwrap();
+        assert_eq!(file.decoded_evals.len(), 1);
+        assert_eq!(file.decoded_evals[0].kind, DecodedEvalKind::Atob);
+    }
+
+    #[test]
+    fn eval_buffer_from_emits_decoded_eval_observation() {
+        let facts = HeuristicAnalyzer.analyze_package(&package_with_files(vec![SourceFile {
+            path: "src/index.js".to_string(),
+            contents: r#"eval(Buffer.from("SGVsbG8=", "base64").toString());"#.to_string(),
+        }]));
+
+        let file = facts.files.into_iter().next().unwrap();
+        assert_eq!(file.decoded_evals.len(), 1);
+        assert_eq!(file.decoded_evals[0].kind, DecodedEvalKind::BufferFrom);
+    }
+
+    #[test]
+    fn eval_unescape_emits_decoded_eval_observation() {
+        let facts = HeuristicAnalyzer.analyze_package(&package_with_files(vec![SourceFile {
+            path: "src/index.js".to_string(),
+            contents: r#"eval(unescape("%61%6c%65%72%74"));"#.to_string(),
+        }]));
+
+        let file = facts.files.into_iter().next().unwrap();
+        assert_eq!(file.decoded_evals.len(), 1);
+        assert_eq!(file.decoded_evals[0].kind, DecodedEvalKind::Unescape);
+    }
+
+    #[test]
+    fn plain_eval_does_not_emit_decoded_eval_observation() {
+        let facts = HeuristicAnalyzer.analyze_package(&package_with_files(vec![SourceFile {
+            path: "src/index.js".to_string(),
+            contents: r#"eval("1+1");"#.to_string(),
+        }]));
+
+        let file = facts.files.into_iter().next().unwrap();
+        assert!(file.decoded_evals.is_empty());
     }
 }
