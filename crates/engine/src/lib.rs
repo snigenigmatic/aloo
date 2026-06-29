@@ -42,7 +42,11 @@ impl<A: Analyzer> Engine<A> {
     }
 
     #[must_use]
-    pub fn evaluate(&self, current: &PackageVersion) -> Verdict {
+    pub fn evaluate_against(
+        &self,
+        current: &PackageVersion,
+        _baseline: Option<&PackageVersion>,
+    ) -> Verdict {
         let facts = self.analyzer.analyze_package(current);
         let mut reasons = signals::manifest::run(&facts);
         normalize_reasons(&mut reasons);
@@ -81,7 +85,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn engine_evaluate_runs_manifest_signal() {
+    fn engine_evaluate_against_runs_manifest_signal() {
         let mut scripts = BTreeMap::new();
         scripts.insert("postinstall".to_string(), "node index.js".to_string());
         let package = PackageVersion {
@@ -97,7 +101,7 @@ mod tests {
             files: Vec::new(),
         };
 
-        let verdict = Engine::default().evaluate(&package);
+        let verdict = Engine::default().evaluate_against(&package, None);
 
         assert_eq!(verdict.decision, Decision::Warn);
         assert_eq!(verdict.analyzer, "heuristic");

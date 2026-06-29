@@ -1,0 +1,8 @@
+{
+  "name": "safe-postinstall",
+  "version": "1.0.0",
+  "keywords": ["install", "build"],
+  "scripts": {
+    "postinstall": "node scripts/setup.js"
+  }
+}

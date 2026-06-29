@@ -101,11 +101,11 @@ fn lifecycle_file_facts(pkg: &PackageVersion) -> Option<FileFacts> {
 }
 
 fn manifest_line(raw: &str, hook: &str) -> usize {
-    let needle = format!("\"{hook}\"");
+    let key = format!("\"{hook}\":");
     raw.lines()
-        .position(|line| line.contains(&needle))
+        .position(|line| line.contains(&key))
         .map(|index| index + 1)
-        .unwrap_or(0)
+        .unwrap_or(1)
 }
 
 fn source_patterns() -> &'static [(SourceKind, Regex)] {
@@ -214,7 +214,7 @@ fn infer_flows(sources: &[SourceObs], sinks: &[SinkObs]) -> Vec<FlowObs> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Manifest, SourceFile};
+    use crate::model::{Manifest, PackageVersion, SourceFile};
     use std::collections::BTreeMap;
 
     fn package(contents: &str) -> PackageVersion {
@@ -402,5 +402,51 @@ mod tests {
         assert_eq!(facts.flows.len(), 1);
         assert_eq!(facts.flows[0].source, SourceKind::ProcessEnv);
         assert_eq!(facts.flows[0].sink, SinkKind::NetworkSend);
+    }
+
+    #[test]
+    fn manifest_line_targets_scripts_key_not_keywords() {
+        let raw = r#"{
+  "name": "case",
+  "keywords": ["install", "native"],
+  "scripts": {
+    "postinstall": "node index.js"
+  }
+}"#;
+        assert_eq!(manifest_line(raw, "postinstall"), 5);
+    }
+
+    #[test]
+    fn lifecycle_script_evidence_uses_scripts_line() {
+        let mut scripts = BTreeMap::new();
+        scripts.insert("postinstall".to_string(), "node index.js".to_string());
+        let raw = r#"{
+  "name": "case",
+  "keywords": ["install"],
+  "scripts": {
+    "postinstall": "node index.js"
+  }
+}"#;
+        let pkg = PackageVersion {
+            name: "case".to_string(),
+            version: "1.0.0".to_string(),
+            manifest: Manifest {
+                name: "case".to_string(),
+                version: "1.0.0".to_string(),
+                scripts,
+                raw: raw.to_string(),
+            },
+            files: Vec::new(),
+        };
+
+        let facts = HeuristicAnalyzer.analyze_package(&pkg);
+        let lifecycle = facts
+            .files
+            .iter()
+            .find(|file| file.path == "package.json")
+            .unwrap();
+
+        assert_eq!(lifecycle.lifecycle_scripts.len(), 1);
+        assert_eq!(lifecycle.lifecycle_scripts[0].evidence.line, 5);
     }
 }
