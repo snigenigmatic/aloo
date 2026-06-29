@@ -3,7 +3,11 @@ use std::collections::BTreeMap;
 
 pub const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 pub const CODE_EXTENSIONS: &[&str] = &["js", "cjs", "mjs", "ts", "jsx", "tsx"];
-pub const LIFECYCLE_HOOKS: &[&str] = &["preinstall", "install", "postinstall"];
+pub const LIFECYCLE_HOOKS: &[LifecycleHook] = &[
+    LifecycleHook::Preinstall,
+    LifecycleHook::Install,
+    LifecycleHook::Postinstall,
+];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -28,11 +32,11 @@ pub struct PackageVersion {
 }
 
 impl PackageVersion {
-    pub fn lifecycle_scripts(&self) -> impl Iterator<Item = (&str, &str)> {
+    pub fn lifecycle_scripts(&self) -> impl Iterator<Item = (LifecycleHook, &str)> {
         LIFECYCLE_HOOKS.iter().filter_map(|hook| {
             self.manifest
                 .scripts
-                .get(*hook)
+                .get(hook.as_str())
                 .map(|body| (*hook, body.as_str()))
         })
     }
@@ -87,6 +91,31 @@ pub struct Evidence {
     pub snippet: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleHook {
+    Preinstall,
+    Install,
+    Postinstall,
+}
+
+impl LifecycleHook {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LifecycleHook::Preinstall => "preinstall",
+            LifecycleHook::Install => "install",
+            LifecycleHook::Postinstall => "postinstall",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct LifecycleScriptObs {
+    pub hook: LifecycleHook,
+    pub command: String,
+    pub evidence: Evidence,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceObs {
     pub kind: SourceKind,
@@ -109,6 +138,7 @@ pub struct FlowObs {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileFacts {
     pub path: String,
+    pub lifecycle_scripts: Vec<LifecycleScriptObs>,
     pub sources: Vec<SourceObs>,
     pub sinks: Vec<SinkObs>,
     pub flows: Vec<FlowObs>,
@@ -120,6 +150,12 @@ pub struct PackageFacts {
 }
 
 impl PackageFacts {
+    pub fn lifecycle_scripts(&self) -> impl Iterator<Item = &LifecycleScriptObs> {
+        self.files
+            .iter()
+            .flat_map(|file| file.lifecycle_scripts.iter())
+    }
+
     pub fn flows(&self) -> impl Iterator<Item = &FlowObs> {
         self.files.iter().flat_map(|file| file.flows.iter())
     }

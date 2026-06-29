@@ -2,20 +2,112 @@ pub mod analyzer;
 pub mod backend;
 pub mod model;
 pub mod score;
+pub mod signals;
 
 pub use analyzer::Analyzer;
 pub use backend::heuristic::HeuristicAnalyzer;
 pub use model::{
-    CODE_EXTENSIONS, Decision, Evidence, FileFacts, FlowObs, LIFECYCLE_HOOKS, MAX_FILE_BYTES,
-    Manifest, PackageFacts, PackageVersion, Reason, ReasonCode, Sensitivity, Severity, SinkKind,
-    SinkObs, SourceFile, SourceKind, SourceObs, Verdict,
+    CODE_EXTENSIONS, Decision, Evidence, FileFacts, FlowObs, LIFECYCLE_HOOKS, LifecycleHook,
+    LifecycleScriptObs, MAX_FILE_BYTES, Manifest, PackageFacts, PackageVersion, Reason, ReasonCode,
+    Sensitivity, Severity, SinkKind, SinkObs, SourceFile, SourceKind, SourceObs, Verdict,
 };
 pub use score::{ScoreConfig, score_reasons, score_reasons_with_config, severity_weight};
+
+pub struct Engine<A> {
+    analyzer: A,
+    score_config: ScoreConfig,
+}
+
+impl Default for Engine<HeuristicAnalyzer> {
+    fn default() -> Self {
+        Self::new(HeuristicAnalyzer)
+    }
+}
+
+impl<A: Analyzer> Engine<A> {
+    #[must_use]
+    pub fn new(analyzer: A) -> Self {
+        Self {
+            analyzer,
+            score_config: ScoreConfig::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_score_config(analyzer: A, score_config: ScoreConfig) -> Self {
+        Self {
+            analyzer,
+            score_config,
+        }
+    }
+
+    #[must_use]
+    pub fn evaluate_against(
+        &self,
+        current: &PackageVersion,
+        _baseline: Option<&PackageVersion>,
+    ) -> Verdict {
+        let facts = self.analyzer.analyze_package(current);
+        let mut reasons = signals::manifest::run(&facts);
+        normalize_reasons(&mut reasons);
+        let (decision, score) = score_reasons_with_config(&reasons, self.score_config);
+
+        Verdict {
+            package: current.name.clone(),
+            version: current.version.clone(),
+            decision,
+            score,
+            analyzer: self.analyzer.name().to_string(),
+            reasons,
+        }
+    }
+}
+
+fn normalize_reasons(reasons: &mut Vec<Reason>) {
+    reasons.retain(|reason| !reason.evidence.is_empty());
+    for reason in reasons.iter_mut() {
+        reason.evidence.sort();
+        reason.evidence.dedup();
+    }
+    reasons.sort_by(|a, b| {
+        b.severity
+            .cmp(&a.severity)
+            .then(a.code.cmp(&b.code))
+            .then(a.title.cmp(&b.title))
+            .then(a.evidence.cmp(&b.evidence))
+    });
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde::Serialize;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn engine_evaluate_against_runs_manifest_signal() {
+        let mut scripts = BTreeMap::new();
+        scripts.insert("postinstall".to_string(), "node index.js".to_string());
+        let package = PackageVersion {
+            name: "case".to_string(),
+            version: "1.0.0".to_string(),
+            manifest: Manifest {
+                name: "case".to_string(),
+                version: "1.0.0".to_string(),
+                scripts,
+                raw: "{\n  \"scripts\": {\n    \"postinstall\": \"node index.js\"\n  }\n}"
+                    .to_string(),
+            },
+            files: Vec::new(),
+        };
+
+        let verdict = Engine::default().evaluate_against(&package, None);
+
+        assert_eq!(verdict.decision, Decision::Warn);
+        assert_eq!(verdict.analyzer, "heuristic");
+        assert_eq!(verdict.reasons.len(), 1);
+        assert_eq!(verdict.reasons[0].code, ReasonCode::InstallScriptPresent);
+    }
 
     #[test]
     fn verdict_round_trips_to_json() {
@@ -35,6 +127,7 @@ mod tests {
             reason_code_variants: [ReasonCode; 7],
             source_kind_variants: [SourceKind; 7],
             sink_kind_variants: [SinkKind; 4],
+            lifecycle_hook_variants: [LifecycleHook; 3],
         }
 
         let snapshot = SchemaSnapshot {
@@ -70,6 +163,11 @@ mod tests {
                 SinkKind::ProcessExec,
                 SinkKind::DynamicEval,
                 SinkKind::FilesystemWrite,
+            ],
+            lifecycle_hook_variants: [
+                LifecycleHook::Preinstall,
+                LifecycleHook::Install,
+                LifecycleHook::Postinstall,
             ],
         };
 
@@ -159,6 +257,11 @@ mod tests {
     "process_exec",
     "dynamic_eval",
     "filesystem_write"
+  ],
+  "lifecycle_hook_variants": [
+    "preinstall",
+    "install",
+    "postinstall"
   ]
 }
 "###);
