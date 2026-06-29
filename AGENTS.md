@@ -114,6 +114,8 @@ A change to detection is not done until the bench shows it helped and did not re
 
 Fixtures are synthetic and inert. Use `example.com`, `localhost`, or `127.0.0.1` as endpoints. Representative attack patterns only. Never commit working exploit payloads, real command-and-control or exfiltration URLs, or copied live malware.
 
+IoC fixtures are the one exception: the detection regex matches real service domains (`discord.com`, `discordapp.com`, `api.telegram.org`), so the fixture must reference the real host to exercise the pattern. Tokens and paths in these fixtures are inert placeholders, never live credentials or real webhook targets.
+
 ## Intelligence layer
 
 aloo has two tiers. The deterministic engine detects. The intelligence layer explains. They are different jobs, run in different processes, and must never be confused.

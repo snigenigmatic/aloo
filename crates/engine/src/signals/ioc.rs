@@ -26,7 +26,7 @@ pub fn run(facts: &PackageFacts) -> Vec<Reason> {
             code: ReasonCode::KnownIoc,
             severity: Severity::High,
             title: "Known exfiltration endpoint referenced".to_string(),
-            detail: "The package references a Discord webhook or Telegram bot endpoint used as a destination for stolen data.".to_string(),
+            detail: "The package references a known exfiltration endpoint used as a destination for stolen data.".to_string(),
             evidence: endpoint_evidence,
         });
     }
@@ -36,7 +36,9 @@ pub fn run(facts: &PackageFacts) -> Vec<Reason> {
             code: ReasonCode::DynamicEval,
             severity: Severity::High,
             title: "Dynamic evaluation of decoded payload".to_string(),
-            detail: "The package evaluates a decoded payload through eval(atob(...)), eval(Buffer.from(...)), or eval(unescape(...)).".to_string(),
+            detail:
+                "The package evaluates a decoded payload through a dynamic code execution sink."
+                    .to_string(),
             evidence: decoded_eval_evidence,
         });
     }
