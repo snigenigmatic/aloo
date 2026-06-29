@@ -52,47 +52,59 @@ Do not enable `oxc` in default builds. It is the planned upgrade path for the ta
 
 ## Architecture
 
-The engine has one boundary that must stay clean: the `Analyzer` trait.
+The engine has two boundaries that must stay clean: the `Analyzer` trait and the `Engine` verdict assembly seam.
 
 ```
-PackageVersion ──> Analyzer ──> PackageFacts ──> signals ──> Vec<Reason> ──> score ──> Verdict
+Package artifact path ──> loader ──> PackageVersion ──> Analyzer ──> PackageFacts ──> signals ──> Vec<Reason> ──> normalize ──> score ──> Verdict
 ```
 
-- `Analyzer` (`engine/src/analyzer.rs`) turns a package into `PackageFacts`: observed sources, sinks, and flows. This is the only component that understands JavaScript.
+- `Analyzer` (`engine/src/analyzer.rs`) turns a package into `PackageFacts`. This is the only component that understands JavaScript or raw package contents.
 - The default backend is `HeuristicAnalyzer` (`engine/src/backend/heuristic.rs`): regex and line-level detection, co-occurrence reachability.
 - The future backend is `OxcAnalyzer` (`engine/src/backend/oxc.rs`, feature `oxc`): real AST, scope resolution, and dataflow taint over oxc's semantic model.
+- `Engine` (`engine/src/lib.rs`) is the single module that assembles a `Verdict`. CLI, bench, MCP, and future orchestration layers are adapters around loader + `Engine`; they must not manually assemble analyzer + signals + score.
+- Analyzer selection belongs outside `Engine`. Callers choose the concrete analyzer adapter; `Engine` depends only on the `Analyzer` interface.
 
-The reason this boundary exists: the heuristic backend is good enough for v0, and oxc is a heavy dependency and a large build. We ship on heuristics now and swap in oxc behind the same trait later. That swap stays a swap only if you obey this:
+The reason these boundaries exist: the heuristic backend is good enough for v0, oxc is a heavy dependency and a large build, and all future surfaces need one deterministic path from package artifact to verdict. That only stays true if you obey this:
 
-**Never let oxc-specific types cross into the engine's public interface or into the signal passes.** Signals consume `PackageFacts` and nothing else. If a signal reaches into a backend or imports anything oxc, the boundary is broken and the future swap becomes a rewrite. This is the single most expensive mistake you can make in this codebase.
+**Never let oxc-specific types cross into the engine's public interface or into the signal passes.**
+
+**Never let signals scan raw package contents directly.** Signals consume `PackageFacts` only. If a signal reaches into a backend, imports anything oxc, or reads raw source text, the seam is broken and the future swap becomes a rewrite.
 
 ## How detection works
 
 The domain model (`engine/src/model.rs`):
 
+- A **package artifact** is the package directory or `.tgz` tarball bytes that would actually be installed or executed.
 - A **source** is where sensitive data originates: `process.env`, `.env` files, npm tokens, SSH keys, AWS credentials, wallet data, browser data.
 - A **sink** is where data escapes or code executes: network send, process exec, dynamic eval, filesystem write.
 - A **flow** is a source reaching a sink. A flow from a credential source to a network sink is exfiltration. This is the core signal and the thing generic scanners miss.
+- **PackageFacts** is the complete static-facts interface emitted by an `Analyzer` and consumed by signals. It may store facts by file internally, but signal modules consume package-level iterators and facts, not raw text.
+- A **Reason** is a deterministic, machine-actionable finding with closed `ReasonCode`, severity, detail, and evidence.
 
-Signal passes (`engine/src/signals/`), each returning `Vec<Reason>`:
+Signal passes (`engine/src/signals/`), each returning `Vec<Reason>` from `PackageFacts`:
 
-- `manifest` — install/preinstall/postinstall scripts, and dangerous commands inside them.
-- `entropy` — base64 blobs, fromCharCode chains, high-entropy literals.
-- `ioc` — deterministic high-confidence indicators (exfil endpoints, eval-of-decoded-payload).
-- `taint` — flows from `PackageFacts`. Credential source to network sink.
-- `diff` — compares a version against its predecessor. A flow or install script that appears in a new release of a previously clean package is the account-takeover case, where reputation and age signals all say safe. Catching this is the wedge.
+- `manifest` — lifecycle script facts and dangerous install commands.
+- `entropy` — encoded/obfuscated literal facts.
+- `ioc` — deterministic high-confidence indicators such as exfil endpoints and eval-of-decoded-payload.
+- `taint` — flows from `PackageFacts`. Credential source to sink.
+- `diff` — compares current facts against predecessor facts. A flow or install script that appears in a new release of a previously clean package is the account-takeover case, where age and reputation signals all say safe.
+
+`Engine` normalizes reasons centrally before scoring: drop no-evidence reasons, sort and dedup evidence, sort reasons deterministically, then call scoring exactly once.
 
 Scoring (`engine/src/score.rs`) is deterministic: any `Critical` reason blocks; otherwise severity weights accumulate against `warn` and `block` thresholds. Do not make scoring depend on anything outside the reasons list.
 
 ## Adding a new signal
 
-1. Create `crates/engine/src/signals/<name>.rs` with `pub fn run(...) -> Vec<Reason>`. Take `&PackageVersion` and/or `&PackageFacts`, never a backend.
-2. Declare it in `crates/engine/src/signals/mod.rs`.
-3. Call it in `Engine::evaluate_against` in `crates/engine/src/lib.rs`.
-4. Add at least one labeled fixture to `crates/bench/corpus/` that the signal is meant to catch, and one benign fixture that it must not flag.
-5. Run `cargo run -p aloo-bench`. Confirm recall improved and the false-positive rate did not.
+1. Expand `PackageFacts` if the signal needs new static observations. The `Analyzer` extracts the facts; the signal consumes them.
+2. Create `crates/engine/src/signals/<name>.rs` with `pub fn run(facts: &PackageFacts) -> Vec<Reason>`. Never take a backend. Avoid taking raw `PackageVersion` unless the architecture has explicitly blessed that exception.
+3. Declare it in `crates/engine/src/signals/mod.rs`.
+4. Register it in `Engine` so every surface gets the same verdict pipeline.
+5. Add at least one labeled fixture to `crates/bench/corpus/` that the signal is meant to catch, and one benign fixture that it must not flag.
+6. Run `cargo run -p aloo-bench`. Confirm recall improved and the false-positive rate did not.
 
 Every `Reason` must carry `evidence` (file, line, snippet). A verdict an agent cannot inspect is not acceptable. No evidence, no reason.
+
+A future `ReasonAccumulator` is intentionally deferred. If evidence capping, sorting, deduplication, or repeated reason construction starts duplicating across signals, introduce it as an internal deep module later rather than scattering that policy.
 
 ## The quality gate
 
@@ -107,7 +119,7 @@ Fixtures are synthetic and inert. Use `example.com`, `localhost`, or `127.0.0.1`
 aloo has two tiers. The deterministic engine detects. The intelligence layer explains. They are different jobs, run in different processes, and must never be confused.
 
 ```
-realtime:  PackageVersion -> engine -> Verdict          (milliseconds, gates agents)
+realtime:  package artifact -> loader -> engine -> Verdict          (milliseconds, gates agents)
 batch:     Verdict -> queue -> intelligence worker -> Enrichment   (seconds, for humans)
 ```
 
@@ -115,13 +127,15 @@ The intelligence layer is a background batch job. It reads the deterministic ver
 
 **The one hard rule: the intelligence layer must not change the verdict decision.** `decision` in the original `Verdict` is immutable after it is issued. The model may assess false-positive likelihood in the `false_positive` field, but it may not upgrade a Warn to a Block, downgrade a Block to an Allow, or in any other way modify the `verdict` object it received. The `EnrichedVerdict` carries the original `Verdict` byte-for-byte alongside the `Enrichment`. If you find yourself writing code that reads `enrichment` to make a security decision, that is an architecture violation.
 
+**Reason and Enrichment are different concepts.** Reasons are deterministic, machine-actionable findings in the original `Verdict`; `ReasonCode` remains a closed enum. Enrichment is human-facing narrative text generated after the verdict exists. Freeform LLM text belongs only in `Enrichment`, never in `ReasonCode`, `Severity`, `Evidence`, `score`, or `decision`.
+
 **The model receives structured input only.** The prompt contains the package name, version, decision, score, and the `reasons` array with evidence snippets. It does not receive raw source files. The model is not doing detection. It is reading a finding and generating analysis. Do not blur this boundary.
 
 **The intelligence layer lives in `aloo-intelligence`.** It imports `Verdict` and `EnrichedVerdict` from `aloo-engine` for types only. It never imports signals, the `Analyzer` trait, or scoring logic. It is the one crate where async and HTTP are correct, because the work is waiting on a model API.
 
 **The intelligence layer is never in the critical path.** An agent or shell gate acts on `decision` from the synchronous `Verdict`. Enrichment is for the human reviewing decisions after the fact. Blocking an install on enrichment status is wrong.
 
-**Model output is validated before storage.** If the model returns malformed JSON, a wrong shape, or a modified `decision`, the worker writes `EnrichmentStatus::Failed` and logs the raw response. It never panics and never stores a partial or invalid enrichment.
+**Model output is validated before storage.** If the model returns malformed JSON, a wrong shape, or an attempt to modify `decision`, `score`, `ReasonCode`, `Severity`, or `Evidence`, the worker writes `EnrichmentStatus::Failed` and logs the raw response. It never panics and never stores a partial or invalid enrichment.
 
 ## Conventions
 
@@ -132,7 +146,8 @@ The intelligence layer is a background batch job. It reads the deterministic ver
 
 ## Safety and scope
 
-- The engine and CLI never run package code. They statically analyze bytes. Any dynamic or sandboxed analysis is a separate future tier that must run inside an isolated sandbox (gVisor or Firecracker), never inside this crate and never on the host.
+- The engine and CLI never run package code. They statically analyze package artifact bytes. Any dynamic or sandboxed analysis is a separate future tier that must run inside an isolated sandbox (gVisor or Firecracker), never inside this crate and never on the host.
+- Public package loading in v0 is path-only. Keep byte-loading internal until a real second adapter needs it.
 - The verdict JSON is a contract that agents depend on. `decision` is one of `allow`, `warn`, `block`. Each reason has `code`, `severity`, `title`, `detail`, `evidence`. Do not rename fields or change enum variants without versioning the schema.
 
 ## Definition of done

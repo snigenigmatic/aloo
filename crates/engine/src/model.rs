@@ -135,10 +135,25 @@ pub struct FlowObs {
     pub evidence: Evidence,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EncodedLiteralKind {
+    Base64Blob,
+    FromCharCodeChain,
+    HighEntropyLiteral,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct EncodedLiteralObs {
+    pub kind: EncodedLiteralKind,
+    pub evidence: Evidence,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileFacts {
     pub path: String,
     pub lifecycle_scripts: Vec<LifecycleScriptObs>,
+    pub encoded_literals: Vec<EncodedLiteralObs>,
     pub sources: Vec<SourceObs>,
     pub sinks: Vec<SinkObs>,
     pub flows: Vec<FlowObs>,
@@ -158,6 +173,12 @@ impl PackageFacts {
 
     pub fn flows(&self) -> impl Iterator<Item = &FlowObs> {
         self.files.iter().flat_map(|file| file.flows.iter())
+    }
+
+    pub fn encoded_literals(&self) -> impl Iterator<Item = &EncodedLiteralObs> {
+        self.files
+            .iter()
+            .flat_map(|file| file.encoded_literals.iter())
     }
 }
 

@@ -1,7 +1,7 @@
 use crate::analyzer::Analyzer;
 use crate::model::{
-    FileFacts, FlowObs, LifecycleScriptObs, PackageFacts, PackageVersion, SinkKind, SinkObs,
-    SourceKind, SourceObs, evidence,
+    EncodedLiteralKind, EncodedLiteralObs, FileFacts, FlowObs, LifecycleScriptObs, PackageFacts,
+    PackageVersion, SinkKind, SinkObs, SourceKind, SourceObs, evidence,
 };
 use regex::Regex;
 use std::collections::BTreeMap;
@@ -18,8 +18,13 @@ impl Analyzer for HeuristicAnalyzer {
         let mut files = lifecycle_file_facts(pkg)
             .into_iter()
             .chain(pkg.files.iter().filter_map(|file| {
+                if is_package_json(&file.path) {
+                    return None;
+                }
+
                 let mut sources = Vec::new();
                 let mut sinks = Vec::new();
+                let mut encoded_literals = Vec::new();
 
                 for (index, line) in file.contents.lines().enumerate() {
                     let line_number = index + 1;
@@ -41,21 +46,30 @@ impl Analyzer for HeuristicAnalyzer {
                             });
                         }
                     }
+
+                    encoded_literals.extend(extract_encoded_literals(
+                        &file.path,
+                        line_number,
+                        line,
+                    ));
                 }
 
                 sources.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.evidence.cmp(&b.evidence)));
                 sinks.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.evidence.cmp(&b.evidence)));
+                encoded_literals.sort();
+                encoded_literals.dedup();
                 sources.dedup_by(|a, b| a.kind == b.kind && a.evidence == b.evidence);
                 sinks.dedup_by(|a, b| a.kind == b.kind && a.evidence == b.evidence);
 
                 let flows = infer_flows(&sources, &sinks);
 
-                if sources.is_empty() && sinks.is_empty() {
+                if sources.is_empty() && sinks.is_empty() && encoded_literals.is_empty() {
                     None
                 } else {
                     Some(FileFacts {
                         path: file.path.clone(),
                         lifecycle_scripts: Vec::new(),
+                        encoded_literals,
                         sources,
                         sinks,
                         flows,
@@ -93,6 +107,7 @@ fn lifecycle_file_facts(pkg: &PackageVersion) -> Option<FileFacts> {
         Some(FileFacts {
             path: "package.json".to_string(),
             lifecycle_scripts,
+            encoded_literals: Vec::new(),
             sources: Vec::new(),
             sinks: Vec::new(),
             flows: Vec::new(),
@@ -106,6 +121,110 @@ fn manifest_line(raw: &str, hook: &str) -> usize {
         .position(|line| line.contains(&key))
         .map(|index| index + 1)
         .unwrap_or(1)
+}
+
+fn is_package_json(path: &str) -> bool {
+    path == "package.json" || path.ends_with("/package.json") || path.ends_with("\\package.json")
+}
+
+const MIN_HIGH_ENTROPY_LITERAL_LEN: usize = 120;
+const HIGH_ENTROPY_THRESHOLD: f64 = 4.5;
+const MIN_FROM_CHAR_CODE_CALLS: usize = 4;
+
+fn extract_encoded_literals(path: &str, line_number: usize, line: &str) -> Vec<EncodedLiteralObs> {
+    let mut observations = Vec::new();
+
+    for pattern in base64_patterns() {
+        if pattern.is_match(line) {
+            observations.push(EncodedLiteralObs {
+                kind: EncodedLiteralKind::Base64Blob,
+                evidence: evidence(path, line_number, line),
+            });
+            break;
+        }
+    }
+
+    if from_char_code_pattern().find_iter(line).count() >= MIN_FROM_CHAR_CODE_CALLS {
+        observations.push(EncodedLiteralObs {
+            kind: EncodedLiteralKind::FromCharCodeChain,
+            evidence: evidence(path, line_number, line),
+        });
+    }
+
+    for literal in quoted_literals(line) {
+        if literal.chars().count() >= MIN_HIGH_ENTROPY_LITERAL_LEN
+            && shannon_entropy(literal) > HIGH_ENTROPY_THRESHOLD
+        {
+            observations.push(EncodedLiteralObs {
+                kind: EncodedLiteralKind::HighEntropyLiteral,
+                evidence: evidence(path, line_number, line),
+            });
+            break;
+        }
+    }
+
+    observations
+}
+
+fn quoted_literals(line: &str) -> Vec<&str> {
+    let mut literals = Vec::new();
+    let bytes = line.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let quote = bytes[index];
+        if quote == b'"' || quote == b'\'' || quote == b'`' {
+            let start = index + 1;
+            index += 1;
+            while index < bytes.len() && bytes[index] != quote {
+                if bytes[index] == b'\\' && index + 1 < bytes.len() {
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+            if index < bytes.len() {
+                literals.push(&line[start..index]);
+            }
+            index += 1;
+        } else {
+            index += 1;
+        }
+    }
+
+    literals
+}
+
+fn shannon_entropy(value: &str) -> f64 {
+    if value.is_empty() {
+        return 0.0;
+    }
+
+    let mut counts = BTreeMap::<char, usize>::new();
+    for ch in value.chars() {
+        *counts.entry(ch).or_default() += 1;
+    }
+
+    let length = value.chars().count() as f64;
+    counts
+        .values()
+        .map(|count| {
+            let probability = *count as f64 / length;
+            -probability * probability.log2()
+        })
+        .sum()
+}
+
+fn base64_patterns() -> &'static [Regex] {
+    static BASE64_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    BASE64_PATTERNS
+        .get_or_init(|| vec![Regex::new(r"[A-Za-z0-9+/]{200,}={0,2}").unwrap()])
+        .as_slice()
+}
+
+fn from_char_code_pattern() -> &'static Regex {
+    static FROM_CHAR_CODE_PATTERN: OnceLock<Regex> = OnceLock::new();
+    FROM_CHAR_CODE_PATTERN.get_or_init(|| Regex::new(r"String\.fromCharCode\s*\(").unwrap())
 }
 
 fn source_patterns() -> &'static [(SourceKind, Regex)] {
@@ -214,7 +333,7 @@ fn infer_flows(sources: &[SourceObs], sinks: &[SinkObs]) -> Vec<FlowObs> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Manifest, PackageVersion, SourceFile};
+    use crate::model::{EncodedLiteralKind, Manifest, PackageVersion, SourceFile};
     use std::collections::BTreeMap;
 
     fn package(contents: &str) -> PackageVersion {
@@ -448,5 +567,126 @@ mod tests {
 
         assert_eq!(lifecycle.lifecycle_scripts.len(), 1);
         assert_eq!(lifecycle.lifecycle_scripts[0].evidence.line, 5);
+    }
+
+    fn package_with_files(files: Vec<SourceFile>) -> PackageVersion {
+        PackageVersion {
+            name: "case".to_string(),
+            version: "1.0.0".to_string(),
+            manifest: Manifest {
+                name: "case".to_string(),
+                version: "1.0.0".to_string(),
+                scripts: BTreeMap::new(),
+                raw: "{}".to_string(),
+            },
+            files,
+        }
+    }
+
+    #[test]
+    fn base64_blob_emits_encoded_literal_observation() {
+        let blob = "A".repeat(200);
+        let facts = HeuristicAnalyzer.analyze_package(&package_with_files(vec![SourceFile {
+            path: "src/index.js".to_string(),
+            contents: format!("const payload = \"{blob}\";"),
+        }]));
+
+        let file = facts.files.into_iter().next().unwrap();
+        assert_eq!(file.encoded_literals.len(), 1);
+        assert_eq!(
+            file.encoded_literals[0].kind,
+            EncodedLiteralKind::Base64Blob
+        );
+    }
+
+    #[test]
+    fn from_char_code_chain_emits_encoded_literal_observation() {
+        let contents = "const x = String.fromCharCode(65)+String.fromCharCode(66)+String.fromCharCode(67)+String.fromCharCode(68);";
+        let facts = HeuristicAnalyzer.analyze_package(&package_with_files(vec![SourceFile {
+            path: "src/index.js".to_string(),
+            contents: contents.to_string(),
+        }]));
+
+        let file = facts.files.into_iter().next().unwrap();
+        assert_eq!(file.encoded_literals.len(), 1);
+        assert_eq!(
+            file.encoded_literals[0].kind,
+            EncodedLiteralKind::FromCharCodeChain
+        );
+    }
+
+    #[test]
+    fn high_entropy_literal_emits_encoded_literal_observation() {
+        let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let literal: String = alphabet.chars().cycle().take(128).collect();
+        let facts = HeuristicAnalyzer.analyze_package(&package_with_files(vec![SourceFile {
+            path: "src/index.js".to_string(),
+            contents: format!("const payload = \"{literal}\";"),
+        }]));
+
+        let file = facts.files.into_iter().next().unwrap();
+        assert_eq!(file.encoded_literals.len(), 1);
+        assert_eq!(
+            file.encoded_literals[0].kind,
+            EncodedLiteralKind::HighEntropyLiteral
+        );
+    }
+
+    #[test]
+    fn short_high_entropy_literal_emits_no_observation() {
+        let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let literal: String = alphabet.chars().cycle().take(119).collect();
+        let facts = HeuristicAnalyzer.analyze_package(&package_with_files(vec![SourceFile {
+            path: "src/index.js".to_string(),
+            contents: format!("const payload = \"{literal}\";"),
+        }]));
+
+        assert!(facts.files.is_empty());
+    }
+
+    #[test]
+    fn readable_literal_emits_no_observation() {
+        let literal = "The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog.";
+        let facts = HeuristicAnalyzer.analyze_package(&package_with_files(vec![SourceFile {
+            path: "src/index.js".to_string(),
+            contents: format!("const message = \"{literal}\";"),
+        }]));
+
+        assert!(facts.files.is_empty());
+    }
+
+    #[test]
+    fn package_json_is_excluded_from_entropy_extraction() {
+        let blob = "A".repeat(200);
+        let facts = HeuristicAnalyzer.analyze_package(&package_with_files(vec![SourceFile {
+            path: "package.json".to_string(),
+            contents: format!("{{\"description\": \"{blob}\"}}"),
+        }]));
+
+        assert!(facts.files.is_empty());
+    }
+
+    #[test]
+    fn template_literal_high_entropy_emits_encoded_literal_observation() {
+        let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let literal: String = alphabet.chars().cycle().take(128).collect();
+        let facts = HeuristicAnalyzer.analyze_package(&package_with_files(vec![SourceFile {
+            path: "src/index.js".to_string(),
+            contents: format!("const payload = `{literal}`;"),
+        }]));
+
+        let file = facts.files.into_iter().next().unwrap();
+        assert_eq!(file.encoded_literals.len(), 1);
+        assert_eq!(
+            file.encoded_literals[0].kind,
+            EncodedLiteralKind::HighEntropyLiteral
+        );
+    }
+
+    #[test]
+    fn shannon_entropy_of_uniform_alphabet_is_high() {
+        let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let value: String = alphabet.chars().cycle().take(128).collect();
+        assert!(shannon_entropy(&value) > 4.5);
     }
 }

@@ -7,10 +7,10 @@ No logic here, only shapes and contracts. Type sketches use Rust-ish notation to
 ## The pipeline
 
 ```
-PackageVersion -> Analyzer -> PackageFacts -> signals -> Vec<Reason> -> score -> Verdict
+Package artifact path -> loader -> PackageVersion -> Analyzer -> PackageFacts -> signals -> Vec<Reason> -> normalize -> score -> Verdict
 ```
 
-Everything hangs off this. Lock the types before writing detection, because every component speaks them. The `Analyzer` trait is the one seam that is expensive to get wrong, so design it as if `OxcAnalyzer` already lives behind it.
+Everything hangs off this. Lock the types before writing detection, because every component speaks them. The `Analyzer` trait is the expensive seam to get wrong, and the `Engine` verdict assembly seam is the expensive seam to duplicate. Design both as if `OxcAnalyzer` and future surfaces already live behind them.
 
 ## Data schema
 
@@ -41,29 +41,36 @@ Constants: `MAX_FILE_BYTES = 2 MiB`, code extensions `js cjs mjs ts jsx tsx`, li
 ### Facts layer (emitted by the Analyzer)
 
 ```
-SourceKind     enum: ProcessEnv EnvFile NpmToken SshKey AwsCredentials WalletData BrowserData
+SourceKind       enum: ProcessEnv EnvFile NpmToken SshKey AwsCredentials WalletData BrowserData
   sensitivity() -> Sensitivity
-Sensitivity    enum: Elevated | Critical
-SinkKind       enum: NetworkSend ProcessExec DynamicEval FilesystemWrite
+Sensitivity      enum: Elevated | Critical
+SinkKind         enum: NetworkSend ProcessExec DynamicEval FilesystemWrite
+LifecycleHook    enum: Preinstall Install Postinstall
+  as_str() -> &'static str
 
 Evidence
   file: String
   line: usize
   snippet: String                       trimmed, length-capped
 
-SourceObs { kind: SourceKind, evidence: Evidence }
-SinkObs   { kind: SinkKind,   evidence: Evidence }
-FlowObs   { source: SourceKind, sink: SinkKind, evidence: Evidence }
+LifecycleScriptObs { hook: LifecycleHook, command: String, evidence: Evidence }
+SourceObs          { kind: SourceKind, evidence: Evidence }
+SinkObs            { kind: SinkKind,   evidence: Evidence }
+FlowObs            { source: SourceKind, sink: SinkKind, evidence: Evidence }
 
 FileFacts
   path: String
+  lifecycle_scripts: Vec<LifecycleScriptObs>
   sources: Vec<SourceObs>
   sinks: Vec<SinkObs>
   flows: Vec<FlowObs>
 
 PackageFacts
   files: Vec<FileFacts>
+  lifecycle_scripts() -> iterator over all LifecycleScriptObs
   flows() -> iterator over all FlowObs
+
+PackageFacts is the complete static-facts interface. It may store facts by file internally, but signals consume package-level iterators and facts, not raw source text.
 ```
 
 Sensitivity mapping: ProcessEnv, EnvFile, BrowserData are Elevated. NpmToken, SshKey, AwsCredentials, WalletData are Critical.
@@ -95,15 +102,21 @@ Verdict
 
 `Verdict` serializes to the stable JSON below. Field names and enum variants are a public API. Renaming any of them is a breaking schema change and must be versioned.
 
-### The boundary
+### The boundaries
 
 ```
 trait Analyzer
   name(&self) -> &str
   analyze_package(&self, pkg: &PackageVersion) -> PackageFacts
+
+Engine<A: Analyzer>
+  evaluate(&self, current: &PackageVersion) -> Verdict
+  evaluate_against(&self, current: &PackageVersion, prior: &PackageVersion) -> Verdict
 ```
 
-The only component in the system that understands JavaScript. Nothing oxc-shaped may appear in this signature or in anything a signal touches.
+The `Analyzer` is the only component in the system that understands JavaScript or raw package contents. The `Engine` is the single module that assembles a `Verdict`.
+
+Nothing oxc-shaped may appear in the `Analyzer` signature or in anything a signal touches. Analyzer selection belongs outside `Engine`; callers choose the concrete analyzer adapter and `Engine` depends only on the `Analyzer` interface.
 
 ## Verdict JSON contract
 
@@ -129,10 +142,10 @@ This is what the CLI emits under `--json` and what the MCP tool returns. Agents 
     {
       "code": "known_ioc",
       "severity": "high",
-      "title": "Discord webhook exfiltration endpoint",
-      "detail": "Code references a Discord webhook URL, a common destination for stolen data.",
+      "title": "Reserved webhook exfiltration endpoint",
+      "detail": "Code references a reserved webhook URL used as inert test evidence.",
       "evidence": [
-        { "file": "scripts/setup.js", "line": 9, "snippet": "post('https://discord.com/api/webhooks/...', t)" }
+        { "file": "scripts/setup.js", "line": 9, "snippet": "post('https://webhook.invalid/api/webhooks/...', t)" }
       ]
     },
     {
@@ -150,21 +163,23 @@ This is what the CLI emits under `--json` and what the MCP tool returns. Agents 
 
 ## Signals
 
-Each signal is a pure function returning `Vec<Reason>`.
+Each signal is a pure function returning `Vec<Reason>` from `PackageFacts`.
 
 | Signal | Input | Emits | Severity | Trigger |
 | --- | --- | --- | --- | --- |
-| `manifest` | `&PackageVersion` | InstallScriptPresent | Medium | any lifecycle hook present |
-| `manifest` | `&PackageVersion` | DangerousInstallScript | High | hook body matches dangerous-command set |
-| `entropy` | `&PackageVersion` | Obfuscation | Medium | base64 blob 200+, fromCharCode chain 4+, or high-entropy literal |
-| `ioc` | `&PackageVersion` | KnownIoc | High | Discord webhook or Telegram bot URL |
-| `ioc` | `&PackageVersion` | DynamicEval | High | eval of decoded payload |
+| `manifest` | `&PackageFacts` | InstallScriptPresent | Medium | lifecycle script fact present |
+| `manifest` | `&PackageFacts` | DangerousInstallScript | High | lifecycle script command matches dangerous-command set |
+| `entropy` | `&PackageFacts` | Obfuscation | Medium | encoded/obfuscated literal fact present |
+| `ioc` | `&PackageFacts` | KnownIoc | High | webhook or Telegram endpoint fact present |
+| `ioc` | `&PackageFacts` | DynamicEval | High | eval-of-decoded-payload fact present |
 | `taint` | `&PackageFacts` | CredentialExfiltration | Critical if source sensitivity Critical, else High | a flow from a credential source to a sink |
 | `diff` | `&PackageFacts`, `&PackageFacts` | RiskIntroducedInRelease | High | flow or install script present now, absent in prior version |
 
 `taint` is the wedge: it catches the stealer pattern that CVE matching is structurally blind to. `diff` is the account-takeover case, where age and reputation signals all say safe and only a release-to-release change reveals the problem.
 
 Every `Reason` carries evidence. No evidence, no reason.
+
+A future `ReasonAccumulator` is intentionally deferred. If evidence capping, sorting, deduplication, or repeated reason construction starts duplicating across signals, introduce it later as an internal deep module rather than scattering that policy.
 
 ## Backends
 
@@ -176,9 +191,15 @@ Both implement `Analyzer` and emit identical `PackageFacts` shapes.
 
 ## Loaders
 
-`from_dir(path)`. Recurse, skip `node_modules` and dotfiles, read `package.json` plus code extensions, cap file size, normalize relative paths.
+Public v0 loading is path-only.
 
-`from_tarball(path)` for `.tgz`. Gzip-decode, untar, strip the `package/` prefix npm wraps everything in, read only manifest and code files under the cap.
+`load_package(path)` is the main loader interface. It dispatches to directory or tarball loading.
+
+`load_dir(path)`. Recurse, skip `node_modules` and dotfiles, read `package.json` plus code extensions, cap file size, normalize relative paths.
+
+`load_tarball(path)` for `.tgz`. Gzip-decode, untar, strip the `package/` prefix npm wraps everything in, read only manifest and code files under the cap.
+
+Internal tarball parsing may be reader-based to avoid duplication, but byte-loading is not a public v0 interface until a real second adapter needs it.
 
 The gotcha: the published tarball can differ from the linked git repo, and that gap has been used to ship a clean repo with a dirty tarball. Analyze the artifact you would install, never the repo.
 
@@ -209,7 +230,7 @@ The orchestrator merges these reasons with engine reasons before scoring. The en
 
 ## Orchestration
 
-The only place side effects exist. Load the package, optionally load the prior version for `diff`, optionally fetch registry metadata, gather all reasons, call the one scoring function, emit. CLI, MCP server, and the future backend are all thin orchestrators over the same engine.
+The only place side effects exist. Load the package through the loader module, optionally load the prior version for `diff`, optionally fetch registry metadata, gather external reasons, and call the single verdict assembly seam. CLI, MCP server, and bench are thin adapters over the same loader + `Engine` path.
 
 ## Bench harness
 
@@ -233,7 +254,7 @@ stdio transport, newline-delimited JSON-RPC 2.0, one object per line, no embedde
 
 Methods: `initialize` returns protocol version, server info, and tools capability. `notifications/initialized` is ignored. `tools/list` advertises one tool. `tools/call` runs it. `ping` returns empty.
 
-Tool `vet_package`: input is a path to a directory or tarball in v0, output is the `Verdict` as structured content plus a text rendering. Malformed input returns a JSON-RPC error, never a panic. Synchronous for v0. Move to `rmcp` and `tokio` only when you want an HTTP transport and concurrency.
+Tool `vet_package`: input is a path to a directory or tarball in v0, output is the `Verdict` as structured content plus a text rendering. It loads package artifacts through the loader module and evaluates them through `Engine`. Malformed input returns a JSON-RPC error, never a panic. Synchronous for v0. Move to `rmcp` and `tokio` only when you want an HTTP transport and concurrency.
 
 ## CLI
 
@@ -241,7 +262,7 @@ Tool `vet_package`: input is a path to a directory or tarball in v0, output is t
 aloo vet <path> [--json] [--against <prior-path>]
 ```
 
-Human-readable table by default, the Verdict JSON contract under `--json`, exit code equal to the decision so it drops into a shell gate or a pre-exec hook. `--against` feeds the `diff` signal with a prior version.
+Human-readable table by default, the Verdict JSON contract under `--json`, exit code equal to the decision so it drops into a shell gate or a pre-exec hook. The CLI loads package artifacts through the loader module and evaluates them through `Engine`. `--against` selects `Engine::evaluate_against` with a prior version.
 
 ## Dependencies
 
@@ -333,6 +354,8 @@ Four jobs, each grounded in the deterministic evidence list. The model receives 
 ### What the intelligence layer must not do
 
 It must not change the verdict decision. `decision` in the original `Verdict` is immutable once issued. The model may assess false-positive likelihood, but it cannot upgrade a Warn to a Block or downgrade a Block to an Allow. The `EnrichedVerdict` carries the original `Verdict` alongside the enrichment. The `decision` field agents key on is always the deterministic one.
+
+Reason and Enrichment are different concepts. Reasons are deterministic, machine-actionable findings in the original `Verdict`; `ReasonCode` remains a closed enum. Enrichment is human-facing narrative text generated after the verdict exists. Freeform LLM text belongs only in `Enrichment`, never in `ReasonCode`, `Severity`, `Evidence`, `score`, or `decision`.
 
 It must not explain findings that do not exist. The model receives only the evidence the pipeline produced. It does not receive raw source and a question like "is this malicious." That framing makes it a detector, which is the wrong job and the gameable one.
 
@@ -434,7 +457,7 @@ User message contains:
 - the full `reasons` array with evidence snippets
 - campaign corpus examples as context (few-shot or RAG), relevant to the IoCs present
 
-The model must return valid JSON matching the enrichment fields. Ask for JSON mode or structured output where the model API supports it. Parse and validate before storing.
+The model must return valid JSON matching the enrichment fields. Ask for JSON mode or structured output where the model API supports it. Parse and validate before storing. If the model attempts to modify `decision`, `score`, `ReasonCode`, `Severity`, or `Evidence`, reject the response and mark enrichment `Failed`.
 
 ### Batch job design
 
