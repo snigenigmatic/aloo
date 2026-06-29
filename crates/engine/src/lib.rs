@@ -9,10 +9,10 @@ pub use analyzer::Analyzer;
 pub use backend::heuristic::HeuristicAnalyzer;
 pub use loader::{LoadError, load_dir, load_package, load_tarball};
 pub use model::{
-    CODE_EXTENSIONS, Decision, EncodedLiteralKind, EncodedLiteralObs, Evidence, FileFacts, FlowObs,
-    LIFECYCLE_HOOKS, LifecycleHook, LifecycleScriptObs, MAX_FILE_BYTES, Manifest, PackageFacts,
-    PackageVersion, Reason, ReasonCode, Sensitivity, Severity, SinkKind, SinkObs, SourceFile,
-    SourceKind, SourceObs, Verdict,
+    CODE_EXTENSIONS, Decision, DecodedEvalKind, DecodedEvalObs, EndpointKind, EndpointObs,
+    Evidence, FileFacts, FlowObs, LIFECYCLE_HOOKS, LifecycleHook, LifecycleScriptObs,
+    MAX_FILE_BYTES, Manifest, PackageFacts, PackageVersion, Reason, ReasonCode, Sensitivity,
+    Severity, SinkKind, SinkObs, SourceFile, SourceKind, SourceObs, Verdict,
 };
 pub use score::{ScoreConfig, score_reasons, score_reasons_with_config, severity_weight};
 
@@ -53,6 +53,7 @@ impl<A: Analyzer> Engine<A> {
         let facts = self.analyzer.analyze_package(current);
         let mut reasons = signals::manifest::run(&facts);
         reasons.extend(signals::entropy::run(&facts));
+        reasons.extend(signals::ioc::run(&facts));
         reasons.extend(signals::taint::run(&facts));
         normalize_reasons(&mut reasons);
         let (decision, score) = score_reasons_with_config(&reasons, self.score_config);
@@ -162,6 +163,33 @@ mod tests {
         assert_eq!(verdict.decision, Decision::Warn);
         assert!(verdict.reasons.iter().any(|reason| {
             reason.code == ReasonCode::CredentialExfiltration && reason.severity == Severity::High
+        }));
+    }
+
+    #[test]
+    fn engine_evaluate_against_runs_ioc_signal() {
+        let package = PackageVersion {
+            name: "case".to_string(),
+            version: "1.0.0".to_string(),
+            manifest: Manifest {
+                name: "case".to_string(),
+                version: "1.0.0".to_string(),
+                scripts: BTreeMap::new(),
+                raw: "{}".to_string(),
+            },
+            files: vec![SourceFile {
+                path: "src/index.js".to_string(),
+                contents:
+                    r#"fetch("https://discord.com/api/webhooks/inert-token/example.invalid");"#
+                        .to_string(),
+            }],
+        };
+
+        let verdict = Engine::default().evaluate_against(&package, None);
+
+        assert_eq!(verdict.decision, Decision::Warn);
+        assert!(verdict.reasons.iter().any(|reason| {
+            reason.code == ReasonCode::KnownIoc && reason.severity == Severity::High
         }));
     }
 

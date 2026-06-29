@@ -104,6 +104,8 @@ mod tests {
                 path: "src/index.js".to_string(),
                 lifecycle_scripts: Vec::new(),
                 encoded_literals: Vec::new(),
+                endpoints: Vec::new(),
+                decoded_evals: Vec::new(),
                 sources: Vec::new(),
                 sinks: Vec::new(),
                 flows,

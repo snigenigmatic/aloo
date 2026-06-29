@@ -149,11 +149,40 @@ pub struct EncodedLiteralObs {
     pub evidence: Evidence,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointKind {
+    DiscordWebhook,
+    TelegramBot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct EndpointObs {
+    pub kind: EndpointKind,
+    pub evidence: Evidence,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecodedEvalKind {
+    Atob,
+    BufferFrom,
+    Unescape,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct DecodedEvalObs {
+    pub kind: DecodedEvalKind,
+    pub evidence: Evidence,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileFacts {
     pub path: String,
     pub lifecycle_scripts: Vec<LifecycleScriptObs>,
     pub encoded_literals: Vec<EncodedLiteralObs>,
+    pub endpoints: Vec<EndpointObs>,
+    pub decoded_evals: Vec<DecodedEvalObs>,
     pub sources: Vec<SourceObs>,
     pub sinks: Vec<SinkObs>,
     pub flows: Vec<FlowObs>,
@@ -179,6 +208,14 @@ impl PackageFacts {
         self.files
             .iter()
             .flat_map(|file| file.encoded_literals.iter())
+    }
+
+    pub fn endpoints(&self) -> impl Iterator<Item = &EndpointObs> {
+        self.files.iter().flat_map(|file| file.endpoints.iter())
+    }
+
+    pub fn decoded_evals(&self) -> impl Iterator<Item = &DecodedEvalObs> {
+        self.files.iter().flat_map(|file| file.decoded_evals.iter())
     }
 }
 
