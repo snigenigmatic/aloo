@@ -83,6 +83,7 @@ mod tests {
                         },
                     })
                     .collect(),
+                encoded_literals: Vec::new(),
                 sources: Vec::new(),
                 sinks: Vec::new(),
                 flows: Vec::new(),
