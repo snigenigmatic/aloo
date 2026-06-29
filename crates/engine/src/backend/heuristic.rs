@@ -127,7 +127,6 @@ fn is_package_json(path: &str) -> bool {
     path == "package.json" || path.ends_with("/package.json") || path.ends_with("\\package.json")
 }
 
-const MIN_BASE64_LEN: usize = 200;
 const MIN_HIGH_ENTROPY_LITERAL_LEN: usize = 120;
 const HIGH_ENTROPY_THRESHOLD: f64 = 4.5;
 const MIN_FROM_CHAR_CODE_CALLS: usize = 4;
@@ -136,14 +135,12 @@ fn extract_encoded_literals(path: &str, line_number: usize, line: &str) -> Vec<E
     let mut observations = Vec::new();
 
     for pattern in base64_patterns() {
-        for matched in pattern.find_iter(line) {
-            if matched.as_str().len() >= MIN_BASE64_LEN {
-                observations.push(EncodedLiteralObs {
-                    kind: EncodedLiteralKind::Base64Blob,
-                    evidence: evidence(path, line_number, line),
-                });
-                break;
-            }
+        if pattern.is_match(line) {
+            observations.push(EncodedLiteralObs {
+                kind: EncodedLiteralKind::Base64Blob,
+                evidence: evidence(path, line_number, line),
+            });
+            break;
         }
     }
 
@@ -176,7 +173,7 @@ fn quoted_literals(line: &str) -> Vec<&str> {
 
     while index < bytes.len() {
         let quote = bytes[index];
-        if quote == b'"' || quote == b'\'' {
+        if quote == b'"' || quote == b'\'' || quote == b'`' {
             let start = index + 1;
             index += 1;
             while index < bytes.len() && bytes[index] != quote {
@@ -667,6 +664,23 @@ mod tests {
         }]));
 
         assert!(facts.files.is_empty());
+    }
+
+    #[test]
+    fn template_literal_high_entropy_emits_encoded_literal_observation() {
+        let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let literal: String = alphabet.chars().cycle().take(128).collect();
+        let facts = HeuristicAnalyzer.analyze_package(&package_with_files(vec![SourceFile {
+            path: "src/index.js".to_string(),
+            contents: format!("const payload = `{literal}`;"),
+        }]));
+
+        let file = facts.files.into_iter().next().unwrap();
+        assert_eq!(file.encoded_literals.len(), 1);
+        assert_eq!(
+            file.encoded_literals[0].kind,
+            EncodedLiteralKind::HighEntropyLiteral
+        );
     }
 
     #[test]

@@ -1,11 +1,13 @@
 pub mod analyzer;
 pub mod backend;
+pub mod loader;
 pub mod model;
 pub mod score;
 pub mod signals;
 
 pub use analyzer::Analyzer;
 pub use backend::heuristic::HeuristicAnalyzer;
+pub use loader::{LoadError, load_dir, load_package, load_tarball};
 pub use model::{
     CODE_EXTENSIONS, Decision, EncodedLiteralKind, EncodedLiteralObs, Evidence, FileFacts, FlowObs,
     LIFECYCLE_HOOKS, LifecycleHook, LifecycleScriptObs, MAX_FILE_BYTES, Manifest, PackageFacts,
